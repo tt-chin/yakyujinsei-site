@@ -3,7 +3,9 @@ import { TRAIT_LABELS, TRAIT_TEXT, traitLabel, removedTraitLabel, confidanteElig
 import { EVENT_CATALOG } from '../data/event-cards-jp.js';
 import { EVENT_MODES, eventEligible, eventOdds, effectiveCategory, eventTier, eventPlan, eventInjury, eventIncome, eventTraitUnlocks, EVENT_TRAIT_TEXT, validateEventCatalog } from './event-policy.js';
 import { ensureEventState, beginEvent, eventDrawPool, applyEvent, beginEventSeason, consumeEventSeason, resetEventYear } from './event-state-policy.js';
-import { createSeedShareController, replayURL, copyShareText } from '../ui/seed-share.js';
+import { createSeedShareController, replayURL, shareReplayURL } from '../ui/seed-share.js';
+import { getDisplayPreferences } from '../ui/preferences.js';
+import { getSharePalette, shareTagPalette } from '../ui/share-theme.js';
 import { applyEventSeason, normalizeEventSeason } from './event-season-policy.js';
 import { JP_DATA } from '../data/jp-data.js';
 import { MARKET_BASELINES } from '../data/salary-market-data.js';
@@ -30,6 +32,8 @@ import { formatRehabStatus } from '../ui/condition-view-model.js';
 import { contractTypeLabel } from '../ui/contract-labels.js';
 import { canPlayHighSchoolFall, canPlaySenbatsu, nextSenbatsuEligibleYear, qualificationResult, qualifiesForChampionship, qualifiesForCorporateJapan, qualifiesForUniversityJingu, tournamentResult } from './domestic-tournament-policy.js';
 
+import { normalizeChampionshipState, captureSeasonChampionship, settleChampionship, maintainSeasonEnd } from './championship-policy.js';
+import { normalizeInternationalState, validateInternationalEntry, prepareInternationalResult, commitInternationalResult, INTLACE_UNLOCK_TEXT } from './international-trait-policy.js';
 window.__YAKYO_JP_DATA__ = JP_DATA;
 
 /* シード固定対応RNG。 */
@@ -1302,6 +1306,7 @@ function proSeason(){
   awards(bucket,st);
   S.marketInjury=classifyMarketInjury({seasonFactor:S.seasonFactor,rehab:S.rehab,skipMid:S.skipMid,majorInjuryOccurred:S._majorInjuryThisSeason});
   recordSalaryEvaluation(st);
+  captureSeasonChampionship(S);
   if(S.pos==='P'&&S.seasonFactor>0)tjAccrue();
   tjGamble(()=>demotionAudit(()=>tradeCheck(()=>maybeIntl(()=>nextStep()))));
 }
@@ -1596,9 +1601,9 @@ function movement(){
     if(LV[S.lv].top){
       if(S.faElig){ faFlow(o); return; }
       /* プロ5年目までは球団が保有権を行使して短期更新し、年俸は所属階級の基準額を下回らない。 */
-      const renewalYears=1;S.ct=null;markClubInitiatedRenewal(renewalYears);
+      const renewalYears=1;if(S.org==='NPB')S.ct=null;markClubInitiatedRenewal(renewalYears);
       card('info','チーム契約更新',`まだ球団保有期間（在籍${S.svc}/5年）。球団が契約更新権を行使し、<b class="hl">${renewalYears}年</b>契約を提示。年俸は所属レベル基準となる。`); board(1);
-    } else { const renewalYears=1;S.ct=null;markClubInitiatedRenewal(renewalYears); } /* トップ階級以外。 */
+    } else { const renewalYears=1;if(S.org==='NPB')S.ct=null;markClubInitiatedRenewal(renewalYears); } /* 海外の満了契約は進路確定まで保持する。 */
   }
   crossOffers(o);
 }
@@ -1635,8 +1640,13 @@ function handleDemotion(o,path,idx){
       /* 海外組織で降格時、アジア球団も同時にオファー。 */
       const alts=[];
       if(S.org==='MiLB'){
-        if(o>=LV.NPB1.min&&chance(Math.round(60*ageGateJP())))alts.push({t:'NPB一軍への移籍',s:'NPB移籍契約',f:()=>{buyoutRemaining();signTo('NPB','NPB1');advance();}});
-        else if(o>=LV.NPB2.min&&chance(50))alts.push({t:'日本の二軍（支配下）へ移籍',f:()=>{buyoutRemaining();signTo('NPB','NPB2');advance();}});
+        if(o>=LV.NPB1.min&&chance(Math.round(60*ageGateJP()))){
+          const candidate=salaryCandidate({sourceLevel:S.lv,targetLevel:'NPB1',contractMult:1}),annualSalary=candidate.annualSalary;
+          alts.push({t:'NPB一軍への移籍',s:`NPB移籍契約｜年俸${fmtMoney(annualSalary)}`,f:()=>{buyoutRemaining();signTo('NPB','NPB1',undefined,undefined,undefined,undefined,{annualSalary,candidate});advance();}});
+        }else if(o>=LV.NPB2.min&&chance(50)){
+          const candidate=salaryCandidate({sourceLevel:S.lv,targetLevel:'NPB2',contractMult:1}),annualSalary=candidate.annualSalary;
+          alts.push({t:'日本の二軍（支配下）へ移籍',s:`NPB二軍（支配下）契約｜年俸${fmtMoney(annualSalary)}`,f:()=>{buyoutRemaining();signTo('NPB','NPB2',undefined,undefined,undefined,undefined,{annualSalary,candidate});advance();}});
+        }
       }else if(S.org==='NPB'&&o>=LV.CPBL1.min&&chance(70)){
         const annualSalary=salaryCandidate({sourceLevel:S.lv,targetLevel:'CPBL1',contractMult:1}).annualSalary;
         alts.push({t:'台湾プロ野球からのオファーを受ける',s:`台湾プロ野球一軍契約｜年俸${fmtMoney(annualSalary)}`,f:()=>{buyoutRemaining();signTo('CPBL','CPBL1',undefined,undefined,undefined,undefined,{annualSalary});advance();}});
@@ -2063,7 +2073,7 @@ function retireScene(tiers){
   }
   card('gold','引退の日',txt);
   /* 名人堂票選(可多リーグ並存)。 */
-  const hofs=[]; let firstBallot=false; const hofLeagues=[];
+  const hofs=[]; let firstBallot=false; const hofLeagues=[]; const firstBallotLeagues=[];
   const HOF_CFG={CPBL:{n:'台湾プロ野球殿堂',wait:5,total:132,lg:'台湾プロ野球'},KBO:{n:'韓国野球殿堂',wait:5,total:250,lg:'KBO'},NPB:{n:'日本野球殿堂',wait:5,total:326,lg:'NPB'},MLB:{n:'アメリカ野球殿堂',wait:5,total:389,lg:'メジャーリーグ'}};
   ['CPBL','KBO','NPB','MLB'].forEach(b=>{ const t=tiers[b]; if(!t)return;
     const cfg=HOF_CFG[b];
@@ -2073,7 +2083,7 @@ function retireScene(tiers){
       const fbMult={CPBL:1.15,KBO:1.15,NPB:1.12,MLB:1.2}[b]||1.2;
       const firstNow = t.sc>=th*fbMult;
       const ballotYr = firstNow?1:ri(2,6);
-      if(firstNow){ firstBallot=true; }
+      if(firstNow){ firstBallot=true; firstBallotLeagues.push(cfg.lg); }
       hofLeagues.push(cfg.lg);
       const pct=Math.min(99.1,75+ (t.sc-th)/th*40 + R()*6 - (ballotYr-1)*4);
       const votes=Math.round(cfg.total*Math.max(75,pct)/100);
@@ -2085,7 +2095,7 @@ function retireScene(tiers){
       hofs.push(`${tries}年連続で${cfg.n}の候補となり、最高得票率は${pct.toFixed(1)}%。しかし最後まで75%の壁を越えられなかった。`);
     } });
   if(firstBallot&&!S.traits.legend){ S.traits.legend=true;
-    S.legendLeague=hofLeagues[0]||''; }
+    S.legendLeague=firstBallotLeagues[0]; }
   if(hofs.length)card('gold','殿堂入り投票',hofs.join('<br><br>'));
   if(S.traits.legend){ card('gold','隠し特性解放：'+(S.legendLeague||'')+'歴史に残る名選手',
     `初回投票で殿堂入り――ただ名を連ねただけではない。あなたは<b class="hl">一つの時代を築いた</b>。その名は${S.legendLeague||'野球界'}の歴史に刻まれる。`); }
@@ -2215,7 +2225,7 @@ function endGame(reason){
     if(k==='genius')return 'background:#f3f5f8;border-color:#9aa5b5;color:#4c5868';        /* 天才：銀。 */
     return ''; /* 好影響：既定色はアンバー。 */
   };
-  posT.pos.forEach(k=>{ if(S.traits[k])tr.push(`<span class="tag" style="${tagStyle(k)}">${TN[k]}</span>`); });
+  posT.pos.forEach(k=>{ if(S.traits[k])tr.push(`<span class="tag" style="${tagStyle(k)}">${TN[k]}</span>`+(k==='intlace'?`<p class="small">${TRAIT_TEXT.intlace}</p>`:'')); });
   posT.neg.forEach(k=>{ if(S.traits[k])tr.push(`<span class="tag" style="background:#fff0f0;border-color:#c0392b;color:#a71930">${TN[k]}</span>`); });
   (S.removed||[]).forEach(lbl=>tr.push(`<span class="tag" style="text-decoration:line-through;opacity:.4;color:#8a8a8a;border-color:#4a4a4a">${removedTraitLabel(lbl,S,teamNick)}</span>`));
   const lv=S.love;
@@ -2263,8 +2273,8 @@ function endGame(reason){
   sh.innerHTML=`<div class="title">この野球人生を共有</div>
     <div class="row2" style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn main" id="sh-img" style="flex:1">📸 キャリア画像を作成</button>
-      <button class="btn" id="sh-url" style="flex:1">🔗 リプレイURLをコピー</button>
-    </div><div id="sh-out" style="margin-top:8px"></div>`;
+      <button class="btn" id="sh-url" style="flex:1">🔗 リプレイURLを共有</button>
+    </div><div id="sh-url-status" role="status" aria-live="polite"></div><div id="sh-out" style="margin-top:8px"></div>`;
   $('log').appendChild(sh);
   const imgBtn=sh.querySelector('#sh-img'),urlBtn=sh.querySelector('#sh-url'),shareOut=sh.querySelector('#sh-out');
   imgBtn.type=urlBtn.type='button';
@@ -2276,12 +2286,13 @@ function endGame(reason){
     });
   });
   urlBtn.addEventListener('click',async()=>{
+    if(urlBtn.disabled)return;
     const url=replayURL(S.seed||SEED,location.href);
-    urlBtn.disabled=true;urlBtn.textContent='⏳ コピー中…';
-    const copied=await copyShareText(url);
-    if(copied){urlBtn.textContent='✅ コピーしました';shareOut.innerHTML='<div class="statline" role="status">リプレイURLをコピーしました。</div>';}
-    else{urlBtn.textContent='URLを選択してコピー';shareOut.innerHTML='<label class="statline" style="display:block">下のURLを長押し／選択してコピーしてください。<input value="'+url.replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'" readonly style="width:100%;margin-top:6px;padding:8px;color:var(--chalk);background:var(--panel);border:1px solid var(--edge);border-radius:6px"></label>';const input=shareOut.querySelector('input');input.focus();input.select();}
-    urlBtn.disabled=false;setTimeout(()=>{urlBtn.textContent='🔗 リプレイURLをコピー';},1800);
+    const status=sh.querySelector('#sh-url-status');status.replaceChildren();urlBtn.disabled=true;
+    try{
+      const result=await shareReplayURL(url);status.textContent=result.message;
+      if(result.manual){const input=document.createElement('input');input.value=url;input.readOnly=true;input.setAttribute('aria-label','リプレイURL');input.style.cssText='width:100%;margin-top:6px;padding:8px;color:var(--chalk);background:var(--panel);border:1px solid var(--edge);border-radius:6px';status.appendChild(input);input.focus();input.select();}
+    }finally{urlBtn.disabled=false;}
   });
   choose('',[
     {t:'⚾ 新しい野球人生を始める（新規シード）',main:true,f:()=>{location.href=location.pathname;}},
@@ -2293,6 +2304,14 @@ function endGame(reason){
   }catch(e){} },250);
 }
 /* 結算圖（Canvas 產生 PNG、可長按儲存または自動下載）。 */
+const shareImagePreviews=new Map();
+window.addEventListener('yakyujinsei:displaychange',()=>{
+  const theme=getDisplayPreferences().theme;
+  for(const [out,preview] of shareImagePreviews){
+    if(!out.isConnected){shareImagePreviews.delete(out);continue;}
+    if(preview.theme!==theme)shareImage(preview.evals,out);
+  }
+});
 function shareImage(evals,out){
   const isP=S.pos==='P';
   const tiers=evals.map(t=>t.replace(/<[^>]+>/g,''));
@@ -2380,9 +2399,9 @@ function shareImage(evals,out){
   honorBlocks.slice(rows2).forEach(b => rightH += b.length * 23);
   const honorsTotalHeight = Math.max(leftH, rightH);
   const eventTraitLines=[];
-  Object.keys(EVENT_TRAIT_TEXT).filter(key=>S.traits[key]).forEach(key=>{
+  Object.keys({...EVENT_TRAIT_TEXT,intlace:TRAIT_TEXT.intlace}).filter(key=>S.traits[key]).forEach(key=>{
     let line='';
-    for(const ch of displayTrait(key)+'：'+EVENT_TRAIT_TEXT[key]){
+    for(const ch of displayTrait(key)+'：'+(EVENT_TRAIT_TEXT[key]||TRAIT_TEXT[key])){
       if(c.measureText(line+ch).width>W-PAD*2&&line){eventTraitLines.push(line);line='';}
       line+=ch;
     }
@@ -2409,7 +2428,7 @@ function shareImage(evals,out){
   H+=120; // Four income rows plus space for the seed/version footer.
   cv.width=W*scale; cv.height=H*scale;
   c.scale(scale,scale);
-  const imageColor={bg:'#fff8f8',panel:'#ffffff',edge:'#c9828e',text:'#3a1017',dim:'#875d64',accent:'#a71930',soft:'#6f4048',bad:'#c62828'};
+  const theme=getDisplayPreferences().theme,imageColor=getSharePalette(theme);
   c.fillStyle=imageColor.bg; c.fillRect(0,0,W,H);
   c.strokeStyle=imageColor.edge; c.lineWidth=3; c.strokeRect(10,10,W-20,H-20);
   c.textBaseline='top';
@@ -2432,12 +2451,13 @@ function shareImage(evals,out){
     return {bg:'#fbe9ec',bd:'#c95b6c',fg:'#7f1d2d'};                      /* 赤系の標準特性。 */
   }
   function drawTags(items){ items.forEach(function(o){ const t=o.label, col=tagColor(o);
+    const readable=shareTagPalette(col,theme);
     c.font='12px sans-serif'; const w=c.measureText(t).width+16;
     if(tagx+w>W-PAD&&tagx>PAD){tagx=PAD;y+=26;}
     c.fillStyle=col.bg; c.strokeStyle=col.bd; c.lineWidth=1;
     c.fillRect(tagx,y,w,20); c.strokeRect(tagx,y,w,20);
-    c.fillStyle=col.fg; c.fillText(t,tagx+8,y+3);
-    if(o.rem){ c.strokeStyle='#81757a'; c.beginPath(); c.moveTo(tagx+4,y+10); c.lineTo(tagx+w-4,y+10); c.stroke(); }
+    c.fillStyle=readable.fg; c.fillText(t,tagx+8,y+3);
+    if(o.rem){ c.strokeStyle=readable.fg; c.beginPath(); c.moveTo(tagx+4,y+10); c.lineTo(tagx+w-4,y+10); c.stroke(); }
     tagx+=w+8;
   }); }
   var tagx=PAD;
@@ -2562,6 +2582,8 @@ function shareImage(evals,out){
   c.textAlign='right'; c.fillText(VERSION,W-PAD,H-40); c.textAlign='left';
 
   const url=cv.toDataURL('image/png');
+  for(const previous of shareImagePreviews.keys())if(!previous.isConnected)shareImagePreviews.delete(previous);
+  shareImagePreviews.set(out,{evals,theme});
   const fileName='野球人生リザルト_'+S.name+'.png';
   out.innerHTML=`<img src="${url}" style="width:100%;border-radius:8px" alt="引退リザルト画像">
     <div style="display:flex;gap:8px;margin-top:8px">
@@ -2780,6 +2802,7 @@ $('btn-start').onclick=()=>{
     state.teamName=function(){return teamDisplay(this.orgTeamId,this.lv);};
     for(const key of Object.keys(TRAIT_LABELS))state.traits[key]??=false;
     Object.assign(state,{oldGhostPending:false,oldGhostUsed:false,firstTeamSeasons:{},firstTeamYearsByTeam:{},tripleCrownHistory:{}});
+    Object.assign(state,{championshipResults:{},seasonChampContext:null,seasonEndMaintenanceYear:null,championshipMigrationVersion:1,intlFinalCount:0,intlTraitResults:{},internationalTraitMigrationVersion:1});
     ensureEventState(state);return state;
   };
 
@@ -2800,7 +2823,7 @@ $('btn-start').onclick=()=>{
   };
 
   stageLabel = function(){if(S.stage==='HS')return '高校'+S.stageYr+'年';if(S.stage==='U')return '大学'+S.stageYr+'年';if(S.stage==='CORP')return '社会人'+(S.corpYears+1)+'年目';if(S.stage==='IND')return '独立リーグ'+(S.indYears+1)+'年目';return LV[S.lv]?.n||S.stage;};
-  board = function(phase){LEGACY.board(phase);$('bd-name').firstChild.textContent=S.name;$('bd-sal').textContent=Math.round((S.currentSalary||0)/10000).toLocaleString();const lbl=$('bd-sal')?.nextElementSibling;if(lbl)lbl.textContent='現在年俸（万円）';};
+  board = function(phase){LEGACY.board(phase);$('bd-name').firstChild.textContent=S.name;$('bd-sal').textContent=Math.round((S.currentSalary||0)/10000).toLocaleString();const lbl=$('bd-sal')?.nextElementSibling;if(lbl)lbl.textContent='年俸（万）';};
 
   function setSchool(kind){const a=kind==='U'?DATA.universities:DATA.highSchools,r=pickRecord(a);S.schoolId=r.schoolId;S.schoolTier=r.tier;S.team=r.name;S.lv=kind;S.org='AMATEUR';}
   function setAmateur(stage){S.stage=stage;S.stageYr=0;S.lv=stage;S.org=stage;S.orgTeamId=pickRecord(listByOrg(stage)).teamId;S.team=teamRec(S.orgTeamId).name;if(stage==='CORP')S.corpYears=0;else S.indYears=0;}
@@ -2890,9 +2913,49 @@ $('btn-start').onclick=()=>{
   function intlPhase(e){return Number(e.startDate.slice(5,7))<=6?'PRE':'POST';}
   function intlThreshold(e){return e.eventKey.startsWith('WBC:')?58:55;}
   function intlLevelEligible(e){const wbc=e.eventKey.startsWith('WBC:');return (wbc?['NPB1','MLB','KBO1','CPBL1']:['NPB1','KBO1','CPBL1']).includes(S.lv);}
-  function addIntlStats(){const a=S.ab,IS=S.intlStat,g=ri(5,8);IS.G+=g;if(S.pos==='P'){const dd=(a.vel+a.ctl+a.brk)/3-58,ip=+(ri(4,9)+R()*3).toFixed(1),k9=clamp(7.2+dd*.13,4,14),era=clamp(3.7-dd*.16,.8,8);IS.IP=+(IS.IP+ip).toFixed(1);IS.SO+=Math.round(ip/9*k9);IS.ER+=Math.round(era*ip/9);if(chance(45))IS.W++;if(!isSP()&&chance(30))IS.SV++;}else{const dd=(a.con*.5+a.pow*.2+a.eye*.18+a.spd*.12)-58,pa=g*ri(3,4),ab=Math.round(pa*.86),avg=clamp(.265+dd*.006,.15,.5),h=Math.round(ab*avg),hr=Math.round(h*clamp(.06+Math.max(0,a.pow-58)*.006,.03,.28));IS.PA+=pa;IS.AB+=ab;IS.H+=h;IS.HR+=hr;IS.RBI+=Math.round(hr*2.1+h*.35);}}
-  function completeIntl(e,status,next){S.intlDispatchStatus=status;if(status==='DECLINED')S.intlDeclinedCount++;S.intlCompletedKeys[e.eventKey]=true;S.intlLastEventKey=e.eventKey;S.intlDispatchStatus=null;next();}
-  function processIntlPhase(phase,done){if(S.stage!=='PRO'){done();return;}const q=intlEvents(S.year).filter(e=>intlPhase(e)===phase&&!S.intlCompletedKeys[e.eventKey]);let i=0;const next=()=>{if(i>=q.length){done();return;}const e=q[i++],threshold=intlThreshold(e);if(!intlLevelEligible(e)||ovr()<threshold){completeIntl(e,'DENIED',next);return;}if(S.rehab>0||S.skipMid||S.seasonFactor<1){card('info','日本代表招集見送り',`<b class="hl">${e.name}</b>の代表候補に入ったが、負傷またはリハビリ中のため招集は見送られた。`);completeIntl(e,'DENIED',next);return;}S.intlDispatchStatus='PENDING';choose(`日本代表招集・${e.name}`,[{t:'日本代表として出場',main:true,s:`代表基準：総合${threshold}以上`,f:()=>{const rank=pick(['優勝','準優勝','ベスト4','ベスト8']),pts={優勝:7,準優勝:5,ベスト4:3,ベスト8:1}[rank];addIntlStats();S.pool+=pts;S.injNext+=(S.traits.intlace?0:10);S.intlCount++;S.honors.push(`${S.year} ${e.name}${rank}`);card(rank==='優勝'?'gold':'info',e.name,`日本代表は<b class="hl">${rank}</b>。能力点+${pts}。${S.traits.intlace?'':'大会の疲労により次回の故障率+10%。'}`);completeIntl(e,'APPROVED',next);}},{t:'コンディションを優先して辞退',warn:true,f:()=>completeIntl(e,'DECLINED',next)}]);};next();}
+  function addIntlStats(){const a=S.ab,IS={...S.intlStat},g=ri(5,8);IS.G+=g;if(S.pos==='P'){const dd=(a.vel+a.ctl+a.brk)/3-58,ip=+(ri(4,9)+R()*3).toFixed(1),k9=clamp(7.2+dd*.13,4,14),era=clamp(3.7-dd*.16,.8,8);IS.IP=+(IS.IP+ip).toFixed(1);IS.SO+=Math.round(ip/9*k9);IS.ER+=Math.round(era*ip/9);if(chance(45))IS.W++;if(!isSP()&&chance(30))IS.SV++;}else{const dd=(a.con*.5+a.pow*.2+a.eye*.18+a.spd*.12)-58,pa=g*ri(3,4),ab=Math.round(pa*.86),avg=clamp(.265+dd*.006,.15,.5),h=Math.round(ab*avg),hr=Math.round(h*clamp(.06+Math.max(0,a.pow-58)*.006,.03,.28));IS.PA+=pa;IS.AB+=ab;IS.H+=h;IS.HR+=hr;IS.RBI+=Math.round(hr*2.1+h*.35);}return IS;}
+  function completeIntl(e,status,next){
+    if(S.intlCompletedKeys[e.eventKey])return;
+    if(status==='DECLINED')S.intlDeclinedCount++;
+    S.intlCompletedKeys[e.eventKey]=true;S.intlLastEventKey=e.eventKey;S.intlDispatchStatus=null;next();
+  }
+  function processIntlPhase(phase,done){
+    normalizeInternationalState(S);
+    if(S.stage!=='PRO'){done();return;}
+    const q=intlEvents(S.year).filter(e=>intlPhase(e)===phase&&!S.intlCompletedKeys[e.eventKey]);
+    let i=0;
+    const next=()=>{
+      if(i>=q.length){done();return;}
+      const e=q[i++],threshold=intlThreshold(e);
+      if(!intlLevelEligible(e)||ovr()<threshold){completeIntl(e,'DENIED',next);return;}
+      if(S.rehab>0||S.skipMid||S.seasonFactor<1){
+        card('info','日本代表招集見送り',`<b class="hl">${e.name}</b>の代表候補に入ったが、負傷またはリハビリ中のため招集は見送られた。`);
+        completeIntl(e,'DENIED',next);return;
+      }
+      S.intlDispatchStatus='PENDING';
+      const entryState=S;
+      let prepared=null,continued=false,resultRendered=false,unlockRendered=false;
+      choose(`日本代表招集・${e.name}`,[
+        {t:'日本代表として出場',main:true,s:`代表基準：総合${threshold}以上`,f:()=>{
+          if(S!==entryState||continued||(S.intlCompletedKeys[e.eventKey]&&!prepared))return;
+          validateInternationalEntry(S);
+          if(!prepared){
+            const hadIntlace=Boolean(S.traits.intlace),rank=pick(['優勝','準優勝','ベスト4','ベスト8']),stats=addIntlStats();
+            prepared=prepareInternationalResult(S,e,{rank,stats,hadIntlace});
+          }
+          const {result}=commitInternationalResult(S,prepared);
+          if(!resultRendered){
+            card(result.rank==='優勝'?'gold':'info',e.name,`日本代表は<b class="hl">${result.rank}</b>。能力点+${result.awardedPoints}。${result.injuryAdded?'大会の疲労により次回の故障率+10%。':'大会による故障リスク加算なし。'}`);
+            resultRendered=true;
+          }
+          if(result.unlockedIntlace&&!unlockRendered){card('gold','隠し特性解放：'+displayTrait('intlace'),INTLACE_UNLOCK_TEXT);unlockRendered=true;}
+          continued=true;next();
+        }},
+        {t:'コンディションを優先して辞退',warn:true,f:()=>{if(S!==entryState||continued)return;continued=true;completeIntl(e,'DECLINED',next);}}
+      ]);
+    };
+    next();
+  }
   maybeIntl = function(done){processIntlPhase('POST',done);};
   function phaseIntlPre(){processIntlPhase('PRE',()=>nextStep());}
   startYear = function(){stepQ=[phasePre,phaseIntlPre,phaseMid,phaseEnd];divider(`${S.year}年・${S.age}歳・${stageLabel()}`);nextStep();};
@@ -2905,6 +2968,7 @@ $('btn-start').onclick=()=>{
     const rec=pickRecord(listByOrg(org)),candidate=salaryCandidate({sourceLevel:S.lv,targetLevel:lv,contractMult:1});lv=candidate.targetLevel;const annual=candidate.annualSalary;
     return{t:`${label}：${rec.name}`,s:`${LV[lv].n}｜年俸${fmtMoney(annual)}${candidate.signingTerms.signingBonus>0?'｜契約金'+fmtMoney(candidate.signingTerms.signingBonus):''}`,f:()=>{buyoutRemaining();signTo(org,lv,rec.teamId,ri(1,3),1.3,'OVERSEAS',{contractType:'OVERSEAS_FA'});finish();}};
   }
+  let npbReturnOfferContext=null;
   crossOffers = function(o){
     const finish=()=>advance(),opts=[];
     let offerType='transfer';
@@ -2914,10 +2978,20 @@ $('btn-start').onclick=()=>{
       const c=overseasOffer('CPBL','CPBL1','台湾プロ野球への海外移籍',o,0,finish);
       const m=overseasOffer('MiLB','MLB','MLBへの海外移籍',o,2,finish);
       if(k)opts.push(k);if(c)opts.push(c);if(m)opts.push(m);
-    }else if(['KBO','CPBL','MiLB','MLB'].includes(S.org)&&o>=47){
+    }else if(['KBO','CPBL','MiLB','MLB'].includes(S.org)&&o>=47&&contractNeedsRenewal(S.ct)){
+      // Keep the expired contract until selection; continuing/extended contracts never draw a team.
+      if(npbReturnOfferContext?.state===S&&npbReturnOfferContext.year===S.year&&npbReturnOfferContext.contract===S.ct){
+        if(!npbReturnOfferContext.completed)choose(npbReturnOfferContext.title,npbReturnOfferContext.options);
+        return;
+      }
       offerType=crossOfferType(S.org,'NPB');
+      const context={state:S,year:S.year,contract:S.ct,completed:false};
+      const complete=action=>{if(context.completed)return;context.completed=true;action?.();finish();};
       const rec=pickRecord(listByOrg('NPB')),lv=o>=53?'NPB1':'NPB2',candidate=salaryCandidate({sourceLevel:S.lv,targetLevel:lv,contractMult:1}),annualSalary=candidate.annualSalary;
-      opts.push({t:`NPBへ復帰：${rec.name}`,s:`${LV[lv].n}契約｜年俸${fmtMoney(annualSalary)}`,f:()=>{buyoutRemaining();signTo('NPB',lv,rec.teamId,ri(1,3),1,'RETURN',{annualSalary,candidate});finish();}});
+      opts.push({t:`NPBへ復帰：${rec.name}`,s:`${LV[lv].n}契約｜年俸${fmtMoney(annualSalary)}`,f:()=>complete(()=>{signTo('NPB',lv,rec.teamId,ri(1,3),1,'RETURN',{annualSalary,candidate});})});
+      opts.push({t:'現在の球団に残留',main:true,f:()=>complete()});
+      npbReturnOfferContext=context;context.title=crossOfferTitle(offerType);context.options=opts;
+      choose(context.title,opts);return;
     }
     if(!opts.length){finish();return;}
     opts.splice(4);opts.push({t:'現在の球団に残留',main:true,f:finish});choose(crossOfferTitle(offerType),opts);
@@ -2982,7 +3056,22 @@ $('btn-start').onclick=()=>{
     choose('戦力外・再起オファー（最大4球団）',offers);
   };
 
-  phaseEnd = function(){board(2);migrateSalaryV140State();S.marketInjury=classifyMarketInjury({seasonFactor:S.seasonFactor,rehab:S.rehab,skipMid:S.skipMid,majorInjuryOccurred:S._majorInjuryThisSeason});if(S.stage==='PRO'){if(!S.ct)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');if(S.ct.schemaVersion!==3){S.ct=normalizeContract(S.ct,{currentYear:S.year,currentSalary:S.currentSalary,org:S.org,teamId:S.orgTeamId});S.currentSalary=S.ct.annualSalary;}const due=salaryDueForYear(S.ct,S.year);if(due.scheduleIndex<0)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');const payment=markSalaryPaid(S.ct,S.year),paid=payment.amount;S.ct=payment.contract;S.currentSalary=S.ct.annualSalary||paid;S.careerBaseSalary+=paid;S.careerEarnings+=paid;S.lastSalaryPaidYear=S.year;const incentivePayment=applyIncentivePayment(S,{contract:S.ct,evaluation:S.lastSalaryEvaluation,honors:S.honors,year:S.year}),incentive=incentivePayment.result;if(incentivePayment.paid){S.careerIncentive=incentivePayment.state.careerIncentive;S.careerEarnings=incentivePayment.state.careerEarnings;S.yearlyIncentivePaid=incentivePayment.state.yearlyIncentivePaid;}pendingOffseasonSalary=null;const continuation=contractContinuationForNextYear(S.ct,S.year),continuationText=continuation?`<br><b>現契約を継続</b><br>来季年俸：<b class="hl">${fmtMoney(continuation.nextSalary)}</b><br>契約残り：${continuation.remainingYears}年<br>年俸の再計算はありません<br>今季の実績は次回の契約評価へ反映されます。`:'';card('','シーズン終了',`今季支給年俸：<b class="hl">${fmtMoney(paid)}</b>｜出来高：<b class="hl">${fmtMoney(incentive.amount||0)}</b>（${incentive.level}）<br>スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}<br>今季受取総額：<b class="hl">${fmtMoney(paid+(incentive.amount||0)+(S.yearOutsideIncome||0))}</b>｜生涯収入：${fmtMoney(S.careerEarnings)}${continuationText}`);}else if(S.stage==='IND'){const candidate=salaryCandidate({sourceLevel:'IND',targetLevel:'IND',rating:currentMarketRating(),contractMult:1}),pay=candidate.annualSalary,previousSalary=S.currentSalary;S.currentSalary=pay;S.ct=null;if(S.lastSalaryPaidYear===S.year)throw new Error('SALARY_ALREADY_PAID_FOR_YEAR');S.careerBaseSalary+=pay;S.careerEarnings+=pay;S.lastSalaryPaidYear=S.year;saveSalaryDecision('RENEWAL',candidate,previousSalary,pay);card('','独立リーグ年間報酬',`今季年俸${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。生涯収入：${fmtMoney(S.careerEarnings)} ${salaryDecisionLink()}`);bindLatestSalaryDetailLink();}else if(S.stage==='CORP'){const pay=salaryFor('CORP',S.lastD||0);S.corpIncome+=pay;S.careerEarnings+=pay;card('','社会人給与',`企業給与${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。`);}const go=()=>movement();if(S.pool>0){const p=S.pool;S.pool=0;choose('',[{t:`能力点を分配（${p}点）`,main:true,f:()=>allocUI({pool:p},'シーズン成果の能力点',go)}]);}else go();};
+  let seasonEndContext=null;
+  phaseEnd = function(){
+    if(S.stage==='PRO'&&seasonEndContext?.state===S&&seasonEndContext.year===S.year)return;
+    board(2);migrateSalaryV140State();
+    normalizeChampionshipState(S,teamRec);
+    if(S.stage==='PRO'){
+      const {result,created}=settleChampionship(S,{teamById:teamRec,random:R});
+      maintainSeasonEnd(S);
+      if(S.lastSalaryPaidYear===S.year||S.ct?.annualSchedule?.some(row=>row.year===S.year&&row.paid===true))return;
+      if(created&&result.won){
+        const team=teamRec(result.teamId);
+        card('gold',result.title+'達成',`${escapeHTML(team.name)}が<b class="hl">${result.title}</b>に輝いた。今季の優勝をキャリアの実績に追加した。`);
+      }
+    }
+    seasonEndContext={state:S,year:S.year};
+    S.marketInjury=classifyMarketInjury({seasonFactor:S.seasonFactor,rehab:S.rehab,skipMid:S.skipMid,majorInjuryOccurred:S._majorInjuryThisSeason});if(S.stage==='PRO'){if(!S.ct)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');if(S.ct.schemaVersion!==3){S.ct=normalizeContract(S.ct,{currentYear:S.year,currentSalary:S.currentSalary,org:S.org,teamId:S.orgTeamId});S.currentSalary=S.ct.annualSalary;}const due=salaryDueForYear(S.ct,S.year);if(due.scheduleIndex<0)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');const payment=markSalaryPaid(S.ct,S.year),paid=payment.amount;S.ct=payment.contract;S.currentSalary=S.ct.annualSalary||paid;S.careerBaseSalary+=paid;S.careerEarnings+=paid;S.lastSalaryPaidYear=S.year;const incentivePayment=applyIncentivePayment(S,{contract:S.ct,evaluation:S.lastSalaryEvaluation,honors:S.honors,year:S.year}),incentive=incentivePayment.result;if(incentivePayment.paid){S.careerIncentive=incentivePayment.state.careerIncentive;S.careerEarnings=incentivePayment.state.careerEarnings;S.yearlyIncentivePaid=incentivePayment.state.yearlyIncentivePaid;}pendingOffseasonSalary=null;const continuation=contractContinuationForNextYear(S.ct,S.year),continuationText=continuation?`<br><b>現契約を継続</b><br>来季年俸：<b class="hl">${fmtMoney(continuation.nextSalary)}</b><br>契約残り：${continuation.remainingYears}年<br>年俸の再計算はありません<br>今季の実績は次回の契約評価へ反映されます。`:'';card('','シーズン終了',`今季支給年俸：<b class="hl">${fmtMoney(paid)}</b>｜出来高：<b class="hl">${fmtMoney(incentive.amount||0)}</b>（${incentive.level}）<br>スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}<br>今季受取総額：<b class="hl">${fmtMoney(paid+(incentive.amount||0)+(S.yearOutsideIncome||0))}</b>｜生涯収入：${fmtMoney(S.careerEarnings)}${continuationText}`);}else if(S.stage==='IND'){const candidate=salaryCandidate({sourceLevel:'IND',targetLevel:'IND',rating:currentMarketRating(),contractMult:1}),pay=candidate.annualSalary,previousSalary=S.currentSalary;S.currentSalary=pay;S.ct=null;if(S.lastSalaryPaidYear===S.year)throw new Error('SALARY_ALREADY_PAID_FOR_YEAR');S.careerBaseSalary+=pay;S.careerEarnings+=pay;S.lastSalaryPaidYear=S.year;saveSalaryDecision('RENEWAL',candidate,previousSalary,pay);card('','独立リーグ年間報酬',`今季年俸${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。生涯収入：${fmtMoney(S.careerEarnings)} ${salaryDecisionLink()}`);bindLatestSalaryDetailLink();}else if(S.stage==='CORP'){const pay=salaryFor('CORP',S.lastD||0);S.corpIncome+=pay;S.careerEarnings+=pay;card('','社会人給与',`企業給与${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。`);}const go=()=>movement();if(S.pool>0){const p=S.pool;S.pool=0;choose('',[{t:`能力点を分配（${p}点）`,main:true,f:()=>allocUI({pool:p},'シーズン成果の能力点',go)}]);}else go();};
 
   movement = function(){migrateSalaryV130State();if(S.stage==='HS'){if(S.stageYr<3)advance();else pathChoiceHS();return;}if(S.stage==='U'){if(S.stageYr<4)advance();else pathChoiceU4();return;}if(S.stage==='CORP'){S.corpYears++;const eligible=(S.entryRoute==='HS'?S.corpYears>=3:S.corpYears>=2);const opts=[{t:'社会人野球を続ける',main:true,f:advance},{t:'独立リーグへ移籍',f:()=>{setAmateur('IND');advance();}},{t:'現役を退く',warn:true,f:()=>endGame('社会人野球で現役生活を終えた。')}];if(eligible)opts.unshift({t:'NPBドラフトへ再挑戦',main:true,f:()=>enterDraftPath('CORP')});choose('社会人シーズン終了',opts);return;}if(S.stage==='IND'){S.indYears++;choose('独立リーグシーズン終了',[{t:'NPBドラフトへ再挑戦',main:true,f:()=>enterDraftPath('IND')},{t:'独立リーグに残留',f:advance},{t:'社会人野球へ',f:()=>{setAmateur('CORP');advance();}},{t:'現役を退く',warn:true,f:()=>endGame('独立リーグで現役生活を終えた。')}]);return;}accrueForeignFirstTeamSeason(S);if(S.serviceTimeAccruedYear!==S.year){if(S.org==='NPB'&&S.lv==='NPB1'&&S.seasonFactor>0){S.npbRosterDays+=Math.round(145*S.seasonFactor);while(S.npbRosterDays>=145){S.npbRosterDays-=145;S.npbFaSeasons++;}S.serviceTime.NPB=Math.max(S.serviceTime.NPB,S.npbFaSeasons);}else if(S.org==='MLB'&&S.lv==='MLB'&&S.seasonFactor>=.5)S.serviceTime.MLB++;else if((S.org==='KBO'&&S.lv==='KBO1'||S.org==='CPBL'&&S.lv==='CPBL1')&&S.seasonFactor>0)S.serviceTime[S.org]++;S.serviceTimeAccruedYear=S.year;}const stage=contractStageFor(S.org);if(S.org==='NPB')S.faElig=S.serviceTime.NPB>=8;else if(S.org==='MLB')S.faElig=stage!=='CONTROL';LEGACY.movement();};
 
