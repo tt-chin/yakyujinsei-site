@@ -34,6 +34,7 @@ import { canPlayHighSchoolFall, canPlaySenbatsu, nextSenbatsuEligibleYear, quali
 
 import { normalizeChampionshipState, captureSeasonChampionship, settleChampionship, maintainSeasonEnd } from './championship-policy.js';
 import { normalizeInternationalState, validateInternationalEntry, prepareInternationalResult, commitInternationalResult, INTLACE_UNLOCK_TEXT } from './international-trait-policy.js';
+import { internationalPersonalStats, renderInternationalPersonalStats } from '../ui/international-personal-stats.js';
 window.__YAKYO_JP_DATA__ = JP_DATA;
 
 /* シード固定対応RNG。 */
@@ -259,6 +260,7 @@ function bucketOf(lv){return resolveStatBucket(LV,lv);}
 function traitCard(key,name,desc,tone){ S.traits[key]=true;
   card(tone||'gold','隠し特性解放：'+name,desc); board(0); }
 function removeTrait(key,label){ if(S.traits[key]){ S.traits[key]=false;
+    traitPresentation.get(S)?.delete(key);
     if(!S.removed.includes(label))S.removed.push(label); } }
 /* 一芸特化：評価対象は三つの役割軸のみ——打撃(長打力/Contact)、走塁(速度)、守備(総合)。 */
 function careerAllStars(){ let n=0; ['CPBL','KBO','NPB','MLB'].forEach(b=>{ if(S.stats[b])n+=(S.stats[b].AS||0); }); return n; }
@@ -612,7 +614,7 @@ function statSummary(bucket,st){if(!st)return '';if(S.pos==='P')return `登板 $
 function buildRecordViewModel(){const definitions=[['NPB',[['NPB1','NPB一軍'],['NPB2','NPB二軍'],['NPB_DEV','NPB育成']]],['KBO',[['KBO1','KBO一軍'],['KBO2','KBOフューチャース']]],['台湾プロ野球',[['CPBL1','台湾プロ野球一軍'],['CPBL2','台湾プロ野球二軍']]],['MLB',[['MLB','MLB']]],['MiLB',[['A3','3A'],['A2','2A'],['A1','1A'],['R','ルーキーリーグ']]],['独立リーグ',[['IND','独立リーグ']]],['社会人野球',[['CORP','社会人野球']]]];const byLevel=S.statsByLevel||{};const groups=definitions.map(([label,levels])=>Object.freeze({label,levels:levels.filter(([key])=>byLevel[key]).map(([key,levelLabel])=>Object.freeze({key,label:levelLabel,summary:statSummary(key,byLevel[key])}))})).filter(group=>group.levels.length);return Object.freeze({seasons:Array.isArray(S.log)?S.log.length:0,internationalCount:S.intlCount||0,groups});}
 function rehabStatusText(){return formatRehabStatus(S);}
 function buildAbilityViewModel(){const condition=[{label:'シーズン稼働率',value:`${Math.round((S.seasonFactor??1)*100)}%`},{label:'次回故障リスク加算',value:`${S.injNext||0}%`},{label:'今季一時故障リスク加算',value:`${S.tmpInj||0}%`},{label:'大きな故障（通算）',value:`${S.bigInj||0}回`},{label:'リハビリ',value:rehabStatusText()}];if(S.pos==='P')condition.push({label:'TJゲージ',value:String(S.tj||0)},{label:'トミー・ジョン手術（通算）',value:`${S.tjCount||0}回`});return Object.freeze({positionLabel:POSN[S.pos],abilities:POS_AB[S.pos].map(key=>Object.freeze({key,label:ABL[key],current:S.ab[key]||0,potential:S.pot?.[key]??62})),condition:condition.map(item=>Object.freeze(item))});}
-function buildTraitsViewModel(){return Object.freeze({active:Object.entries(S.traits||{}).filter(([,enabled])=>enabled).map(([key])=>displayTrait(key)+((EVENT_TRAIT_TEXT[key]||TRAIT_TEXT[key])?'：'+(EVENT_TRAIT_TEXT[key]||TRAIT_TEXT[key]):'')),removed:(S.removed||[]).map(item=>removedTraitLabel(item,S,teamNick))});}
+function buildTraitsViewModel(){return Object.freeze({active:Object.entries(S.traits||{}).filter(([,enabled])=>enabled).map(([key])=>displayTrait(key)),removed:(S.removed||[]).map(item=>removedTraitLabel(item,S,teamNick))});}
 function buildPlayerViewModel(){return Object.freeze({ability:buildAbilityViewModel(),traits:buildTraitsViewModel()});}
 function buildCareerViewModel(){const ct=S.ct||null,contractDescription=ct?`${ct.startYear||S.year}～${ct.endYear||S.year}年　${contractTypeLabel(ct.contractType)}`:'契約なし';const schedule=Array.isArray(ct?.annualSchedule)&&ct.annualSchedule.length?ct.annualSchedule.map(row=>`${row.year}年 ${fmtMoney(row.amount||0)}${row.paid?'（支払済み）':''}`):['—'];const history=(S.salaryDecisionHistory||[]).map(row=>`${row.salaryYear||row.decisionYear||'—'}年 ${fmtMoney(row.finalSalary||0)}`);return Object.freeze({stats:buildRecordViewModel(),achievements:[...(S.honors||[])],contract:Object.freeze({description:contractDescription,remainingYears:ct?`${ct.remainingYears||0}年`:'—',guaranteedTotal:ct?fmtMoney(ct.guaranteedTotal||0):'—',schedule,currentSalary:fmtMoney(S.currentSalary||0),signingBonus:fmtMoney(S.careerSigningBonus||0),developmentStipend:fmtMoney(S.careerDevelopmentStipend||0),postingFee:ct?.postingFee>0?fmtMoney(ct.postingFee)+'（球団への支払い・生涯収入対象外）':undefined,outsideIncome:fmtMoney(S.careerOutsideIncome||0),yearOutsideIncome:fmtMoney(S.yearOutsideIncome||0),corpIncome:fmtMoney(S.corpIncome||0),incomeLedger:(S.incomeLedger||[]).map(row=>row.year+'年 '+fmtMoney(row.amountYen)),careerEarnings:fmtMoney(S.careerEarnings||0),history}),yearly:(S.log||[]).map(row=>Object.freeze({year:row.y,age:row.age,team:row.tm,summary:row.line||''}))});}
 /* UI基盤。 */
@@ -620,8 +622,43 @@ const $=id=>document.getElementById(id);
 var _curYearBody=null; /* 當前年度的內容容器。 */
 var MAX_YEARS=8;         /* DOM 最大保持年度領域数。 */
 function logTarget(){ return _curYearBody || $('log'); }
+// DOM presentation lifetime only; no display markers in S or replay data.
+const traitPresentation=new WeakMap();
+function archiveTraitResults(){
+  $('log').querySelectorAll('[data-trait-result]').forEach(node=>{
+    node.replaceChildren();const name=document.createElement('h4');name.textContent=node.dataset.traitName;node.appendChild(name);
+    delete node.dataset.traitResult;
+  });
+}
+function traitResultMarkup(node,title,html){
+  const lost={'ゴムゴムの腕、ついに限界':'rubber','結果で黙らせる':'cancer','一芸特化を返上':'onetool','イップス克服':'yips'}[title];
+  if(lost){node.dataset.traitResult='removed:'+lost;node.dataset.traitName=displayTrait(lost);return {title,html};}
+  if(!/^隠し(?:特性解放|称号|タイトル)[:：]/.test(title||''))return {title,html};
+  const name=title.replace(/^隠し(?:特性解放|称号|タイトル)[:：]/,'');
+  const key=Object.keys(TRAIT_LABELS).find(k=>name===displayTrait(k)||name===TRAIT_LABELS[k])||(name==='神カード'?'franchise':null);
+  if(!key)return {title,html};
+  let shown=traitPresentation.get(S);if(!shown){shown=new Set(Object.keys(S.traits||{}).filter(k=>S.traits[k]));traitPresentation.set(S,shown);}
+  const label=displayTrait(key);
+  if(!S.traits?.[key]||shown.has(key))return {title:label,html:''};
+  node.dataset.traitResult=key;node.dataset.traitName=label;
+  const effect=EVENT_TRAIT_TEXT[key]||TRAIT_TEXT[key];
+  const reasons={favorite:'25歳未満で通常選択に累計10回成功。',adking:'スポンサーイベントの勝負選択に累計5回成功。',clutch:'25歳未満で勝負選択に累計7回成功。',disc:'25歳未満で安全選択に累計15回成功し、私生活の条件を達成。',distract:'私生活と間食の累計が取得条件に到達。',cancer:'対人イベントの失敗または私生活の悪評により取得。'};
+  if(reasons[key]&&html===effect)html=reasons[key]+'<br>'+html;
+  const memorial=['confidante','goldcloth','miraclegen','strongpitch','stronghit','legend','smallschool','grinder','rainbow','taiwan'];
+  const plain=String(html).replace(/<[^>]*>/g,'');
+  const completeIntlace=key==='intlace'&&/次回/.test(plain)&&/最低2点/.test(plain)&&/故障リスク/.test(plain);
+  if(effect&&!plain.includes(effect)&&!completeIntlace)html+='<br>'+effect;
+  else if(memorial.includes(key)&&!/(追加効果|記念称号)/.test(plain))html+='<br>能力への追加効果はない記念称号です。';
+  if(key==='mrteam')html+='<br>球団がトレードを拒否する、非売品の扱いになります。';
+  if(key==='onetool')html+='<br>得意分野での出場機会を追加する起用補正があります。';
+  const starts={favorite:'成功率の補正は次のイベント選択から適用されます。',clutch:'成功率・分類別効果の補正は次のイベント選択から適用されます。',latepractice:'成功率の補正は次のイベント選択から適用されます。',adking:'収入の補正は次のスポンサーイベントから適用されます。',disc:'シーズン前の衰え判定に適用されます。',distract:'サイコロの減少は次のシーズン前トレーニングから適用されます。'};
+  if(starts[key])html+='<br>'+starts[key];
+  return {title:'隠し特性解放：'+label,html};
+}
 function card(cls,title,html){ const d=document.createElement('div'); d.className='card '+cls;
+  ({title,html}=traitResultMarkup(d,title,html));
   d.innerHTML=(title?`<h4>${title}</h4>`:'')+html; logTarget().appendChild(d);
+  if(d.dataset.traitResult&&!d.dataset.traitResult.startsWith('removed:'))traitPresentation.get(S).add(d.dataset.traitResult);
   scrollBottom(); }
 function divider(t){ /* dividerごとに新しい年度の折りたたみ領域を開始。 */ const log=$('log'); const blocks=log.querySelectorAll('.yr-block'); /* 終了した直前年へ展開アイコンを付けるが、collapsedは付けず開いたままにする。 */ const prev = blocks[blocks.length - 1]; if(prev){ const h = prev.querySelector('.yr-head'); if(h && prev.querySelector('.yr-body').children.length) h.classList.add('has-body'); } /* 二つ前の年度領域を見つけて折りたたむ。 */ const prevPrev = blocks[blocks.length - 2]; if(prevPrev){ prevPrev.classList.add('collapsed'); } /* 建新領域。 */ const block=document.createElement('div'); block.className='yr-block'; const head=document.createElement('div'); head.className='yr-head'; head.textContent=t; const body=document.createElement('div'); body.className='yr-body'; head.onclick=()=>block.classList.toggle('collapsed'); block.appendChild(head); block.appendChild(body); log.appendChild(block); _curYearBody=body; /* 上限超える時は最古の年度領域を削除してDOMを解放。 */ const newBlocks=log.querySelectorAll('.yr-block'); if(newBlocks.length>MAX_YEARS){ for(let i=0;i<newBlocks.length-MAX_YEARS;i++)newBlocks[i].remove(); } }
 function board(phase){
@@ -658,6 +695,8 @@ function actToggleSync(){
 }
 function escapeDiagnosticHTML(v){return String(v).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
 let resultViewDepth=0;
+let currentChoiceAction=null;
+function invokeChoiceAction(action){archiveTraitResults();const previous=currentChoiceAction;currentChoiceAction=action;try{return action();}finally{currentChoiceAction=previous;}}
 function scrollAction(){scrollBottom();}
 function runWithResultView(action){const before=$('log').querySelectorAll('.card').length;resultViewDepth++;try{return action();}finally{resultViewDepth--;if($('log').querySelectorAll('.card').length>before)scrollBottom();else if(!resultViewDepth)scrollAction();}}
 function choose(title,opts){
@@ -669,12 +708,14 @@ function choose(title,opts){
     b.className='btn'+(o.main?' main':'')+(o.warn?' warn':'');
     b.innerHTML=o.t+(o.s?`<small>${o.s}</small>`:'');
     b.disabled=false;
-    b.onclick=()=>runWithResultView(()=>runChoiceAction({action:o.f,currentMarkup:()=>a.innerHTML,clear:actClear,restore:()=>choose(title,opts),token,currentGeneration:()=>choiceGeneration,currentToken:()=>activeChoiceToken,activateToken:t=>{activeChoiceToken=t;},isCurrentChoice:()=>b.isConnected&&a.contains(b),buttonLabel:b.textContent.trim(),disableAll:()=>{a.querySelectorAll('button').forEach(button=>{button.disabled=true;});a.style.pointerEvents='none';},errorContext:()=>{const ct=S?.ct,schedule=Array.isArray(ct?.annualSchedule)?ct.annualSchedule:[],due=schedule.find(x=>Number(x.year)===Number(S?.year));return{year:S?.year??null,age:S?.age??null,stage:S?.stage??null,org:S?.org??null,level:S?.lv??null,contractId:ct?.contractId??null,contractStartYear:ct?.startYear??null,contractEndYear:ct?.endYear??null,contractRemainingYears:ct?.remainingYears??null,contractAnnualSalary:ct?.annualSalary??null,currentSalary:S?.currentSalary??null,lastSalaryPaidYear:S?.lastSalaryPaidYear??null,currentYearSchedule:due?{year:due.year,amount:due.amount,paid:Boolean(due.paid)}:null};},reportError:(error,d)=>{const val=x=>escapeDiagnosticHTML(String(x??'—')),schedule=d.currentYearSchedule?`${val(d.currentYearSchedule.amount)}円／${d.currentYearSchedule.paid?'支払済み':'未払い'}`:'なし';card('bad','処理中にエラーが発生しました',`選択処理を完了できませんでした。<br><b>エラーコード：${val(d.code)}</b><br><small>年度 ${val(d.year)}｜年齢 ${val(d.age)}｜${val(d.org)} ${val(d.level)}<br>契約ID ${val(d.contractId)}｜期間 ${val(d.contractStartYear)}～${val(d.contractEndYear)}｜残り ${val(d.contractRemainingYears)}年<br>現在年俸 ${val(d.currentSalary)}円｜最終支給年 ${val(d.lastSalaryPaidYear)}｜当年度年俸 ${schedule}</small><br>もう一度選択せず、この画面をスクリーンショットして報告してください。`);actToggleSync();}})); a.appendChild(b); });
+    b.onclick=()=>runWithResultView(()=>runChoiceAction({action:()=>invokeChoiceAction(o.f),currentMarkup:()=>a.innerHTML,clear:actClear,restore:()=>choose(title,opts),token,currentGeneration:()=>choiceGeneration,currentToken:()=>activeChoiceToken,activateToken:t=>{activeChoiceToken=t;},isCurrentChoice:()=>b.isConnected&&a.contains(b),buttonLabel:b.textContent.trim(),disableAll:()=>{a.querySelectorAll('button').forEach(button=>{button.disabled=true;});a.style.pointerEvents='none';},errorContext:()=>{const ct=S?.ct,schedule=Array.isArray(ct?.annualSchedule)?ct.annualSchedule:[],due=schedule.find(x=>Number(x.year)===Number(S?.year));return{year:S?.year??null,age:S?.age??null,stage:S?.stage??null,org:S?.org??null,level:S?.lv??null,contractId:ct?.contractId??null,contractStartYear:ct?.startYear??null,contractEndYear:ct?.endYear??null,contractRemainingYears:ct?.remainingYears??null,contractAnnualSalary:ct?.annualSalary??null,currentSalary:S?.currentSalary??null,lastSalaryPaidYear:S?.lastSalaryPaidYear??null,currentYearSchedule:due?{year:due.year,amount:due.amount,paid:Boolean(due.paid)}:null};},reportError:(error,d)=>{const val=x=>escapeDiagnosticHTML(String(x??'—')),schedule=d.currentYearSchedule?`${val(d.currentYearSchedule.amount)}円／${d.currentYearSchedule.paid?'支払済み':'未払い'}`:'なし';card('bad','処理中にエラーが発生しました',`選択処理を完了できませんでした。<br><b>エラーコード：${val(d.code)}</b><br><small>年度 ${val(d.year)}｜年齢 ${val(d.age)}｜${val(d.org)} ${val(d.level)}<br>契約ID ${val(d.contractId)}｜期間 ${val(d.contractStartYear)}～${val(d.contractEndYear)}｜残り ${val(d.contractRemainingYears)}年<br>現在年俸 ${val(d.currentSalary)}円｜最終支給年 ${val(d.lastSalaryPaidYear)}｜当年度年俸 ${schedule}</small><br>もう一度選択せず、この画面をスクリーンショットして報告してください。`);actToggleSync();}})); a.appendChild(b); });
   actToggleSync(); if(!resultViewDepth)scrollAction();
 }
 /* 能力加算介面：mode {dice：[..]} または {pool：n}。 */
 function allocUI(mode,label,done){
-  actClear(); ++choiceGeneration; activeChoiceToken=null; const a=$('act'); const keys=POS_AB[S.pos];
+  actClear(); ++choiceGeneration; const generation=choiceGeneration, state=S; activeChoiceToken=null; const a=$('act'); const keys=POS_AB[S.pos];
+  let completed=false;
+  const live=element=>!completed&&S===state&&choiceGeneration===generation&&element.isConnected&&a.contains(element);
   let dice=mode.dice?mode.dice.slice():null, pool=mode.pool||0, idx=0, hist=[];
   a.innerHTML=`<div class="title">${label}</div><div id="al-top"></div><div id="al-rows"></div><div class="row2" id="al-btm"></div>`;
   const touchedKeys={};
@@ -692,7 +733,7 @@ function allocUI(mode,label,done){
       const r=document.createElement('div'); r.className='abrow'+(cap?' capped':'');r.dataset.abilityKey=k;r.setAttribute('role','button');r.setAttribute('aria-label',dice?`${ABL[k]}に現在のサイコロを割り当てる`:`${ABL[k]}に1ポイント配分`);r.setAttribute('aria-disabled',String(!available));r.tabIndex=available?0:-1;
       const pk=(S.pot&&S.pot[k])||62, cst=abCost(k), cr=(S.carry&&S.carry[k])||0;
       const info=document.createElement('div');info.className='abrow-info';info.innerHTML=`<span class="nm">${ABL[k]}</span><span class="bar"><i style="width:${v/80*100}%"></i><em style="left:${pk/80*100}%"></em></span><span class="val" style="line-height:1.1">${v}<small style="opacity:.5">/${pk}</small><span class="progress">${cr}/${cst}</span></span>`;r.appendChild(info);
-      const allocate=()=>{if(!available)return;const before={abilityKey:k,beforeAbility:S.ab[k],beforeCarry:(S.carry&&S.carry[k])||0,beforePool:pool,beforeDiceIndex:idx,beforeTouched:copyTouched()};const spend=dice?dice[idx]:1;if(spend<=0)return;const got=addAb(k,spend);touchedKeys[k]=(touchedKeys[k]||0)+spend;hist.push({...before,spent:spend,gained:got});if(dice)idx++;else pool--;render(k);board(0);};
+      const allocate=()=>{if(!live(r)||S.ab[k]>=80||remaining()<=0)return;const before={abilityKey:k,beforeAbility:S.ab[k],beforeCarry:(S.carry&&S.carry[k])||0,beforePool:pool,beforeDiceIndex:idx,beforeTouched:copyTouched()};const spend=dice?dice[idx]:1;if(spend<=0)return;archiveTraitResults();const got=addAb(k,spend);touchedKeys[k]=(touchedKeys[k]||0)+spend;hist.push({...before,spent:spend,gained:got});if(dice)idx++;else pool--;render(k);board(0);};
       if(available){r.onclick=allocate;r.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();allocate();}};}
       rows.appendChild(r); });
     btm.innerHTML='';
@@ -700,13 +741,13 @@ function allocUI(mode,label,done){
     const u=document.createElement('button'); u.className='btn'; u.style.textAlign='center';
     u.textContent='↩ 元に戻す'; u.disabled=!hist.length;
     u.style.opacity=hist.length?'1':'0.35'; u.style.cursor=hist.length?'pointer':'default';
-    if(hist.length)u.onclick=()=>{const entry=hist.pop();S.ab[entry.abilityKey]=entry.beforeAbility;if(!S.carry)S.carry={};S.carry[entry.abilityKey]=entry.beforeCarry;pool=entry.beforePool;idx=entry.beforeDiceIndex;restoreTouched(entry.beforeTouched);render(entry.abilityKey);board(0);};
+    if(hist.length)u.onclick=()=>{if(!live(u)||!hist.length)return;const entry=hist.pop();S.ab[entry.abilityKey]=entry.beforeAbility;if(!S.carry)S.carry={};S.carry[entry.abilityKey]=entry.beforeCarry;pool=entry.beforePool;idx=entry.beforeDiceIndex;restoreTouched(entry.beforeTouched);render(entry.abilityKey);board(0);};
     btm.appendChild(u);
-    const reset=document.createElement('button');reset.type='button';reset.className='btn warn';reset.textContent='すべてリセット';reset.disabled=!hist.length;reset.onclick=()=>{Object.assign(S.ab,sessionStart.abilities);S.carry={...sessionStart.carry};pool=sessionStart.pool;idx=sessionStart.diceIndex;restoreTouched(sessionStart.touchedKeys);hist=[];render();board(0);};btm.appendChild(reset);
+    const reset=document.createElement('button');reset.type='button';reset.className='btn warn';reset.textContent='すべてリセット';reset.disabled=!hist.length;reset.onclick=()=>{if(!live(reset)||!hist.length)return;Object.assign(S.ab,sessionStart.abilities);S.carry={...sessionStart.carry};pool=sessionStart.pool;idx=sessionStart.diceIndex;restoreTouched(sessionStart.touchedKeys);hist=[];render();board(0);};btm.appendChild(reset);
     const allCap=keys.every(k=>S.ab[k]>=80);
     if(remaining()===0||allCap){ const c=document.createElement('button'); c.className='btn main';
       c.textContent=(remaining()>0&&allCap)?'能力が上限に達しました。残ったサイコロを捨てます ▸':'確定 ▸';
-      c.onclick=()=>runWithResultView(()=>{ actClear(); allocDone(touchedKeys,dice?true:false); done(); }); btm.appendChild(c); }
+      c.onclick=()=>{if(!live(c)||!(remaining()===0||keys.every(k=>S.ab[k]>=80)))return;completed=true;return runWithResultView(()=>{ archiveTraitResults();actClear(); allocDone(touchedKeys,dice?true:false); done(); });}; btm.appendChild(c); }
     actToggleSync();
     if(focusKey){const target=a.querySelector(`[data-ability-key="${focusKey}"]`);(target?.getAttribute('aria-disabled')==='false'?target:a.querySelector('.abrow[aria-disabled="false"], #al-btm button:not(:disabled)'))?.focus();}
   }
@@ -781,7 +822,7 @@ function phasePre(){
   if(S.pos==='P'&&S.stage==='PRO'&&!S.skipMid){
     afterAsk=()=>{
       choose(`開幕前の投球プラン（腕の状態：${(function(){const r=S.tj/tjCap();return S.rehab>0?'リハビリ中':r>=0.85?'肘に鈍い痛み':r>=0.6?'腕にやや疲労':r>=0.35?'まずまず':'腕が軽い';})()}）`,[
-        {t:'全力投球',warn:true,s:'成績重視｜腕への負担：最大（TJゲージ ×1.25）',f:()=>{S.effort='全力投';preAsk();}},
+        {t:'全力投球',warn:true,s:'成績重視｜腕への負担：最大（TJゲージ ×1.25）',f:()=>{S.effort='全力投球';preAsk();}},
         {t:'通常投球',main:true,s:'標準強度｜TJゲージ増加：通常',f:()=>{S.effort='通常投球';preAsk();}},
         {t:'省エネ投球',s:'成績は控えめ｜腕を温存（TJゲージ ×0.65）',f:()=>{S.effort='省エネ投球';preAsk();}}]);
     };
@@ -1539,7 +1580,7 @@ function movement(){
     if(goldclothEligible(S)){ S.traits.goldcloth=true;
       card('gold','隠し特性解放：黄金のユニフォーム',TRAIT_TEXT.goldcloth); board(1); }
     if(!S.traits.franchise&&S.teamYears>=7&&S.champThisTeam&&S.champTeam===S.orgTeamId){ S.traits.franchise=true;
-      card('gold','隠し特性解放：神カード','この街のファンはあなたの成長を見守ってきた。放出すれば本拠地が炎上することをフロントも分かっている――<b class="hl">所属球団との再契約は年俸係数を1.2倍以上に固定し、引退評価にも加点</b>。'); }
+      card('gold','隠し特性解放：神カード','この街のファンはあなたの成長を見守ってきた。放出すれば本拠地が炎上することをフロントも分かっている――<b class="hl">所属球団との再契約の評価に補正が入り、引退評価にも加点。球団はトレードを拒否する</b>。'); }
     /* ◯◯先生：同じ支球団效力滿 15 年且成績安定。 */
     if(!S.traits.mrteam&&S.teamYears>=15&&(S.lastD||0)>=0){ S.traits.mrteam=true; S.mrTeamName=S.orgTeamId;
       const nick=teamNick(S.orgTeamId);
@@ -2041,6 +2082,7 @@ const FAN={
  4:['ねえ、これは誰ですか？ …調べてみたら、実はプロでプレーしていたことが分かりました。','野球は本当に難しいですね、第二の人生も頑張ってください','また夢を追う者が現実に負けて悲しい','掲示板にはメッセージが 3 件しかなく、そのうちの 1 件に本人が返信しました。'],
 };
 function retireScene(tiers){
+  const alreadyLegend=Boolean(S.traits.legend);
   /* tiers： {CPBL：{i、sc}、NPB：...、MLB：...} 出試合実績がある場合だけ作成。 */
   /* 代表リーグは在籍年数が最長のトップリーグ、評価階級はキャリア最高値（i最小）。 */
   let lg=LV[S.lv]?.statBucket||'MINOR', bestI=4;
@@ -2097,8 +2139,8 @@ function retireScene(tiers){
   if(firstBallot&&!S.traits.legend){ S.traits.legend=true;
     S.legendLeague=firstBallotLeagues[0]; }
   if(hofs.length)card('gold','殿堂入り投票',hofs.join('<br><br>'));
-  if(S.traits.legend){ card('gold','隠し特性解放：'+(S.legendLeague||'')+'歴史に残る名選手',
-    `初回投票で殿堂入り――ただ名を連ねただけではない。あなたは<b class="hl">一つの時代を築いた</b>。その名は${S.legendLeague||'野球界'}の歴史に刻まれる。`); }
+  if(S.traits.legend){ card('gold',(alreadyLegend?'':'隠し特性解放：')+(S.legendLeague||'')+'歴史に残る名選手',
+    alreadyLegend?'':`初回投票で殿堂入り――ただ名を連ねただけではない。あなたは<b class="hl">一つの時代を築いた</b>。その名は${S.legendLeague||'野球界'}の歴史に刻まれる。`); }
 }
 function endGame(reason){
   S.done=true; actClear();
@@ -2217,7 +2259,7 @@ function endGame(reason){
   /* 特質と薪資。 */
   const tr=[];
   const TN=traitNames();
-  const posT={pos:['favorite','adking','legend','taiwan','goldcloth','mrteam','confidante','genius','late','disc','academy','intlace','franchise','clutch','phoenix','rubber','onetool','smallschool','grinder','combo','rainbow','oldghost','miraclegen','strongpitch','stronghit','championmaker','pitcherTC','hitterTC','nitenichi'],neg:['glass','scum','yips','distract','cancer','ambience','thief','latepractice']};
+  const posT={pos:['favorite','adking','legend','taiwan','goldcloth','mrteam','confidante','genius','late','disc','academy','intlace','franchise','clutch','phoenix','rubber','onetool','smallschool','grinder','combo','rainbow','oldghost','miraclegen','strongpitch','stronghit','championmaker','pitcherTC','hitterTC','nitenichi','iron'],neg:['glass','scum','yips','distract','cancer','ambience','thief','latepractice']};
   const tagStyle=k=>{
     if(k==='legend'||k==='taiwan')return 'background:#fff7dc;border-color:#c79520;color:#795b00'; /* 歴史的選手/台湾代表への貢献：金。 */
     if(k==='goldcloth')return 'background:#fffbe0;border-color:#c5a800;color:#6f6000'; /* 黄金のユニフォーム：黄。 */
@@ -2225,7 +2267,7 @@ function endGame(reason){
     if(k==='genius')return 'background:#f3f5f8;border-color:#9aa5b5;color:#4c5868';        /* 天才：銀。 */
     return ''; /* 好影響：既定色はアンバー。 */
   };
-  posT.pos.forEach(k=>{ if(S.traits[k])tr.push(`<span class="tag" style="${tagStyle(k)}">${TN[k]}</span>`+(k==='intlace'?`<p class="small">${TRAIT_TEXT.intlace}</p>`:'')); });
+  posT.pos.forEach(k=>{ if(S.traits[k])tr.push(`<span class="tag" style="${tagStyle(k)}">${TN[k]}</span>`); });
   posT.neg.forEach(k=>{ if(S.traits[k])tr.push(`<span class="tag" style="background:#fff0f0;border-color:#c0392b;color:#a71930">${TN[k]}</span>`); });
   (S.removed||[]).forEach(lbl=>tr.push(`<span class="tag" style="text-decoration:line-through;opacity:.4;color:#8a8a8a;border-color:#4a4a4a">${removedTraitLabel(lbl,S,teamNick)}</span>`));
   const lv=S.love;
@@ -2279,6 +2321,7 @@ function endGame(reason){
   const imgBtn=sh.querySelector('#sh-img'),urlBtn=sh.querySelector('#sh-url'),shareOut=sh.querySelector('#sh-out');
   imgBtn.type=urlBtn.type='button';
   imgBtn.addEventListener('click',()=>{
+    archiveTraitResults();
     imgBtn.disabled=true; imgBtn.textContent='⏳ キャリア画像を作成中…';
     requestAnimationFrame(()=>{try{shareImage(evals,shareOut);imgBtn.textContent='✅ キャリア画像を作成しました';}
       catch(err){console.error(err);shareOut.innerHTML='<div class="statline" role="alert">画像を作成できませんでした。ページを再読み込みして、もう一度お試しください。</div>';imgBtn.textContent='⚠️ もう一度作成する';}
@@ -2287,6 +2330,7 @@ function endGame(reason){
   });
   urlBtn.addEventListener('click',async()=>{
     if(urlBtn.disabled)return;
+    archiveTraitResults();
     const url=replayURL(S.seed||SEED,location.href);
     const status=sh.querySelector('#sh-url-status');status.replaceChildren();urlBtn.disabled=true;
     try{
@@ -2398,15 +2442,6 @@ function shareImage(evals,out){
   honorBlocks.slice(0, rows2).forEach(b => leftH += b.length * 23);
   honorBlocks.slice(rows2).forEach(b => rightH += b.length * 23);
   const honorsTotalHeight = Math.max(leftH, rightH);
-  const eventTraitLines=[];
-  Object.keys({...EVENT_TRAIT_TEXT,intlace:TRAIT_TEXT.intlace}).filter(key=>S.traits[key]).forEach(key=>{
-    let line='';
-    for(const ch of displayTrait(key)+'：'+(EVENT_TRAIT_TEXT[key]||TRAIT_TEXT[key])){
-      if(c.measureText(line+ch).width>W-PAD*2&&line){eventTraitLines.push(line);line='';}
-      line+=ch;
-    }
-    if(line)eventTraitLines.push(line);
-  });
   /* 預估総高さ。 */
   const traitTags=keepTr.concat(remTr);
   c.font='12px sans-serif';
@@ -2415,7 +2450,6 @@ function shareImage(evals,out){
   let H=150; // header
   H+=30+tiers.length*24+14; // 評価。
   if(traitTags.length)H+=tagRows*26+4;
-  H+=eventTraitLines.length*20;
   H+=34+(leagues.length+1)*26+16; // 通算成績表。
   if(S.intlCount>0)H+=30+24+28+12; // 国際大会欄。
   H+=30+honorsTotalHeight+16; // 栄誉(二欄改行後的高さ)。
@@ -2463,7 +2497,6 @@ function shareImage(evals,out){
   var tagx=PAD;
   if(traitTags.length){ drawTags(traitTags); y+=30; }
   c.font='13px sans-serif';c.fillStyle=imageColor.text;
-  eventTraitLines.forEach(line=>{c.fillText(line,PAD,y);y+=20;});
 
   function hr(){ c.strokeStyle=imageColor.edge; c.lineWidth=1; c.beginPath(); c.moveTo(PAD,y); c.lineTo(W-PAD,y); c.stroke(); y+=12; }
   function sectionTitle(t){ c.fillStyle=imageColor.dim; c.font='bold 13px sans-serif'; c.fillText(t,PAD,y); y+=22; }
@@ -2803,13 +2836,16 @@ $('btn-start').onclick=()=>{
     for(const key of Object.keys(TRAIT_LABELS))state.traits[key]??=false;
     Object.assign(state,{oldGhostPending:false,oldGhostUsed:false,firstTeamSeasons:{},firstTeamYearsByTeam:{},tripleCrownHistory:{}});
     Object.assign(state,{championshipResults:{},seasonChampContext:null,seasonEndMaintenanceYear:null,championshipMigrationVersion:1,intlFinalCount:0,intlTraitResults:{},internationalTraitMigrationVersion:1});
-    ensureEventState(state);return state;
+    traitPresentation.set(state,new Set(Object.keys(state.traits).filter(key=>state.traits[key])));
+    ensureEventState(state);state.potSum0=Object.values(pot).reduce((sum,value)=>sum+value,0);return state;
   };
 
   const nextContractId=(org,teamId,signedYear)=>{S.contractSequence=(Number(S.contractSequence)||0)+1;return`${org}:${teamId}:${signedYear}:${String(S.contractSequence).padStart(3,'0')}`;};
-  function fixedContract({org,teamId,years,annualSalary,contractType='NORMAL',signingBonus=0,signingBonusType='NONE',developmentStipend=0,postingFee=0,postingFeeRecipient=null,candidate,startYear=S.year+1,incentive,offerBreakdown}){let breakdown=offerBreakdown??candidate?.crossLeague??null;if(org==='KBO'){const cap=applyKboForeignPackageCap({annualSalary,signingBonus,postingFee,isRenewal:candidate?.sourceOrg==='KBO'||S.ct?.org==='KBO',previousPackage:kboPreviousPackage(),levelMinimum:salaryFor(candidate?.targetLevel||S.lv,0)});annualSalary=cap.annualSalary;breakdown={...breakdown,...cap,finalAnnualSalary:annualSalary};if(incentive)incentive=createIncentiveTerms({org,annualSalary});}const contract=createContract({contractId:nextContractId(org,teamId,S.year),org,teamId,signedYear:S.year,startYear,years,annualSalary,contractType,signingBonus,signingBonusType,developmentStipend,postingFee,postingFeeRecipient,signedMarketRating:candidate?.convertedRating??currentMarketRating(),positionMultiplierAtSigning:candidate?.positionMult??dpMult(),contractMultiplier:candidate?.contractMult??1,incentive:incentive===undefined?createIncentiveTerms({org,annualSalary}):incentive,offerBreakdown:breakdown});if(org==='KBO')S.lastKboPackage=annualSalary+(contract.incentive?.annualMax||0)+signingBonus+postingFee;return contract;}
+  function fixedContract({org,teamId,years,annualSalary,contractType='NORMAL',signingBonus=0,signingBonusType='NONE',developmentStipend=0,postingFee=0,postingFeeRecipient=null,candidate,startYear=S.year+1,incentive,offerBreakdown,transaction}){let breakdown=offerBreakdown??candidate?.crossLeague??null;if(org==='KBO'){const cap=applyKboForeignPackageCap({annualSalary,signingBonus,postingFee,isRenewal:candidate?.sourceOrg==='KBO'||S.ct?.org==='KBO',previousPackage:kboPreviousPackage(),levelMinimum:salaryFor(candidate?.targetLevel||S.lv,0)});annualSalary=cap.annualSalary;breakdown={...breakdown,...cap,finalAnnualSalary:annualSalary};if(incentive)incentive=createIncentiveTerms({org,annualSalary});}const sequence=(Number(S.contractSequence)||0)+1,contractId=`${org}:${teamId}:${S.year}:${String(sequence).padStart(3,'0')}`;const contract=createContract({contractId,org,teamId,signedYear:S.year,startYear,years,annualSalary,contractType,signingBonus,signingBonusType,developmentStipend,postingFee,postingFeeRecipient,signedMarketRating:candidate?.convertedRating??currentMarketRating(),positionMultiplierAtSigning:candidate?.positionMult??dpMult(),contractMultiplier:candidate?.contractMult??1,incentive:incentive===undefined?createIncentiveTerms({org,annualSalary}):incentive,offerBreakdown:breakdown});S.contractSequence=sequence;if(org==='KBO')S.lastKboPackage=annualSalary+(contract.incentive?.annualMax||0)+signingBonus+postingFee;if(transaction)transaction.contract=contract;return contract;}
 
-  signTo = function(org,lv,teamId,yrs,mult,decisionType,options={}){ const rec=teamId?teamRec(teamId):pickRecord(listByOrg(org));if(!rec)throw new Error('INVALID_TEAM_MASTER');const sourceLevel=S.lv,sourceStage=S.stage,sourceOrg=S.org,previousSalary=options.candidate?.previousSalary??previousSalaryForOffer(),changed=rec.teamId!==S.orgTeamId,contractYears=yrs||2,contractMult=mult||1;const candidate=options.candidate||salaryCandidate({sourceLevel:LV[sourceLevel]?sourceLevel:lv,targetLevel:lv,rating:sourceStage==='PRO'?currentMarketRating():0,contractMult,transferType:decisionType||'TRANSFER'});lv=candidate.targetLevel;const annualSalary=options.annualSalary??candidate.annualSalary,contractType=candidate.crossLeague?.eligibilityType==='MLB_INTL_RESTRICTED'?'ROOKIE':options.contractType||'NORMAL',startYear=options.startYear??S.year+1,terms=options.signingTerms||candidate.signingTerms,bonus=options.signingBonus??terms?.signingBonus??0,postingFee=calculatePostingFee({guaranteedTotal:annualSalary*contractYears,signingBonus:bonus,major:lv==='MLB',eligible:candidate.postingEligible});S.org=org;S.lv=lv;S.stage='PRO';S.stageYr=0;S.team='';S.orgTeamId=rec.teamId;if(changed){S.teamYears=0;S.champThisTeam=false;S.champTeam=null;}S.ct=fixedContract({org,teamId:rec.teamId,years:contractYears,annualSalary,contractType,signingBonus:bonus,signingBonusType:terms?.signingBonusType||'NONE',developmentStipend:terms?.developmentStipend||0,postingFee,postingFeeRecipient:postingFee>0?candidate.sourceTeamId:null,candidate,startYear,incentive:options.incentive,offerBreakdown:options.offerBreakdown});applySigningPayment(S,S.ct);if(['MLB','MiLB'].includes(candidate.targetOrg))S.americanContractSigned=true;S.currentSalary=S.ct.annualSalary;pendingOffseasonSalary=null;const inferred=decisionType||(sourceStage!=='PRO'?'NEW_CONTRACT':sourceOrg==='NPB'&&org!=='NPB'?'OVERSEAS':sourceOrg!=='NPB'&&org==='NPB'?'RETURN':'NEW_CONTRACT');saveSalaryDecision(inferred,candidate,previousSalary,S.currentSalary);card('info','契約',`<b class="hl">${escapeHTML(rec.name)}</b>と${S.ct.years}年契約を結んだ（年俸 ${fmtMoney(S.currentSalary)}）。${bonus>0?'契約金'+fmtMoney(bonus)+'。':''}${S.ct.developmentStipend>0?'育成支度金'+fmtMoney(S.ct.developmentStipend)+'。':''}${postingFee>0?'ポスティング譲渡金 '+fmtMoney(postingFee)+'（球団への支払い・生涯収入対象外）。':''}${salaryDecisionSummary()} ${salaryDecisionLink()}`);bindLatestSalaryDetailLink();board(2); };
+  let signingRenderRetry=null;
+  // Prepare before affiliation commit; a failed display retries only that completed transaction.
+  signTo = function(org,lv,teamId,yrs,mult,decisionType,options={}){ if(signingRenderRetry?.state===S&&signingRenderRetry.year===S.year&&signingRenderRetry.action===currentChoiceAction&&signingRenderRetry.contractId===S.ct?.contractId&&(currentChoiceAction!==null||signingRenderRetry.request===JSON.stringify([org,lv,teamId,yrs,mult,decisionType]))){signingRenderRetry.render();signingRenderRetry=null;return;}const request=JSON.stringify([org,lv,teamId,yrs,mult,decisionType]);const rec=teamId?teamRec(teamId):pickRecord(listByOrg(org));if(!rec)throw new Error('INVALID_TEAM_MASTER');const sourceLevel=S.lv,sourceStage=S.stage,sourceOrg=S.org,previousSalary=options.candidate?.previousSalary??previousSalaryForOffer(),changed=rec.teamId!==S.orgTeamId,contractYears=yrs||2,contractMult=mult||1;const candidate=options.candidate||salaryCandidate({sourceLevel:LV[sourceLevel]?sourceLevel:lv,targetLevel:lv,rating:sourceStage==='PRO'?currentMarketRating():0,contractMult,transferType:decisionType||'TRANSFER'});lv=candidate.targetLevel;const annualSalary=options.annualSalary??candidate.annualSalary,contractType=candidate.crossLeague?.eligibilityType==='MLB_INTL_RESTRICTED'?'ROOKIE':options.contractType||'NORMAL',startYear=options.startYear??S.year+1,terms=options.signingTerms||candidate.signingTerms,bonus=options.signingBonus??terms?.signingBonus??0,postingFee=calculatePostingFee({guaranteedTotal:annualSalary*contractYears,signingBonus:bonus,major:lv==='MLB',eligible:candidate.postingEligible});const transaction=options.transaction?.state===S&&options.transaction.year===S.year?options.transaction:null;const contract=transaction?.contract||fixedContract({org,teamId:rec.teamId,years:contractYears,annualSalary,contractType,signingBonus:bonus,signingBonusType:terms?.signingBonusType||'NONE',developmentStipend:terms?.developmentStipend||0,postingFee,postingFeeRecipient:postingFee>0?candidate.sourceTeamId:null,candidate,startYear,incentive:options.incentive,offerBreakdown:options.offerBreakdown,transaction});S.org=org;S.lv=lv;S.stage='PRO';S.stageYr=0;S.team='';S.orgTeamId=rec.teamId;if(changed){S.teamYears=0;S.champThisTeam=false;S.champTeam=null;}S.ct=contract;applySigningPayment(S,S.ct);if(['MLB','MiLB'].includes(candidate.targetOrg))S.americanContractSigned=true;S.currentSalary=S.ct.annualSalary;pendingOffseasonSalary=null;const inferred=decisionType||(sourceStage!=='PRO'?'NEW_CONTRACT':sourceOrg==='NPB'&&org!=='NPB'?'OVERSEAS':sourceOrg!=='NPB'&&org==='NPB'?'RETURN':'NEW_CONTRACT');saveSalaryDecision(inferred,candidate,previousSalary,S.currentSalary);const render=()=>{card('info','契約',`<b class="hl">${escapeHTML(rec.name)}</b>と${S.ct.years}年契約を結んだ（年俸 ${fmtMoney(S.currentSalary)}）。${bonus>0?'契約金'+fmtMoney(bonus)+'。':''}${S.ct.developmentStipend>0?'育成支度金'+fmtMoney(S.ct.developmentStipend)+'。':''}${postingFee>0?'ポスティング譲渡金 '+fmtMoney(postingFee)+'（球団への支払い・生涯収入対象外）。':''}${salaryDecisionSummary()} ${salaryDecisionLink()}`);bindLatestSalaryDetailLink();board(2);};signingRenderRetry={state:S,year:S.year,action:currentChoiceAction,contractId:S.ct.contractId,request,render};render();signingRenderRetry=null; };
 
   /* トレードは同一組織の固定球団ID間だけで行い、移籍先を必ず通知する。 */
   doTradeExec = function(){
@@ -2940,12 +2976,14 @@ $('btn-start').onclick=()=>{
           if(S!==entryState||continued||(S.intlCompletedKeys[e.eventKey]&&!prepared))return;
           validateInternationalEntry(S);
           if(!prepared){
+            const beforeStats={...S.intlStat},position=S.pos,role=S.role;
             const hadIntlace=Boolean(S.traits.intlace),rank=pick(['優勝','準優勝','ベスト4','ベスト8']),stats=addIntlStats();
-            prepared=prepareInternationalResult(S,e,{rank,stats,hadIntlace});
+            const personalStats=internationalPersonalStats(beforeStats,stats,position,role);
+            prepared=prepareInternationalResult(S,e,{rank,stats,hadIntlace,personalStats});
           }
           const {result}=commitInternationalResult(S,prepared);
           if(!resultRendered){
-            card(result.rank==='優勝'?'gold':'info',e.name,`日本代表は<b class="hl">${result.rank}</b>。能力点+${result.awardedPoints}。${result.injuryAdded?'大会の疲労により次回の故障率+10%。':'大会による故障リスク加算なし。'}`);
+            card(result.rank==='優勝'?'gold':'info',e.name,`日本代表は<b class="hl">${result.rank}</b>。能力点+${result.awardedPoints}。${result.injuryAdded?'大会の疲労により次回の故障率+10%。':'大会による故障リスク加算なし。'}`+renderInternationalPersonalStats(result.personalStats,fmtIP));
             resultRendered=true;
           }
           if(result.unlockedIntlace&&!unlockRendered){card('gold','隠し特性解放：'+displayTrait('intlace'),INTLACE_UNLOCK_TEXT);unlockRendered=true;}
@@ -2985,10 +3023,15 @@ $('btn-start').onclick=()=>{
         return;
       }
       offerType=crossOfferType(S.org,'NPB');
-      const context={state:S,year:S.year,contract:S.ct,completed:false};
-      const complete=action=>{if(context.completed)return;context.completed=true;action?.();finish();};
+      const context={state:S,year:S.year,contract:S.ct,completed:false,running:false,actionCompleted:false,years:null,transaction:{state:S,year:S.year,contract:null}};
+      const complete=action=>{
+        if(context.completed||context.running||context.state!==S||context.year!==S.year)return;
+        context.running=true;
+        try{if(!context.actionCompleted){action?.();context.actionCompleted=true;}finish();context.completed=true;}
+        finally{context.running=false;if(S.year!==context.year)context.completed=true;}
+      };
       const rec=pickRecord(listByOrg('NPB')),lv=o>=53?'NPB1':'NPB2',candidate=salaryCandidate({sourceLevel:S.lv,targetLevel:lv,contractMult:1}),annualSalary=candidate.annualSalary;
-      opts.push({t:`NPBへ復帰：${rec.name}`,s:`${LV[lv].n}契約｜年俸${fmtMoney(annualSalary)}`,f:()=>complete(()=>{signTo('NPB',lv,rec.teamId,ri(1,3),1,'RETURN',{annualSalary,candidate});})});
+      opts.push({t:`NPBへ復帰：${rec.name}`,s:`${LV[lv].n}契約｜年俸${fmtMoney(annualSalary)}`,f:()=>complete(()=>{context.years??=ri(1,3);signTo('NPB',lv,rec.teamId,context.years,1,'RETURN',{annualSalary,candidate,transaction:context.transaction});})});
       opts.push({t:'現在の球団に残留',main:true,f:()=>complete()});
       npbReturnOfferContext=context;context.title=crossOfferTitle(offerType);context.options=opts;
       choose(context.title,opts);return;
@@ -3057,7 +3100,18 @@ $('btn-start').onclick=()=>{
   };
 
   let seasonEndContext=null;
+  const corpSettlements=new WeakMap();
+  // Payment and successful completion are separate: a display failure must not repay.
   phaseEnd = function(){
+    if(S.stage!=='CORP')return settlePhaseEnd();
+    const state=S,year=S.year;
+    let entry=corpSettlements.get(state);
+    if(!entry||entry.year!==year){entry={year,paid:false,complete:false,running:false};corpSettlements.set(state,entry);}
+    if(entry.complete||entry.running)return;
+    entry.running=true;
+    try{settlePhaseEnd();entry.complete=true;}finally{entry.running=false;}
+  };
+  function settlePhaseEnd(){
     if(S.stage==='PRO'&&seasonEndContext?.state===S&&seasonEndContext.year===S.year)return;
     board(2);migrateSalaryV140State();
     normalizeChampionshipState(S,teamRec);
@@ -3071,7 +3125,7 @@ $('btn-start').onclick=()=>{
       }
     }
     seasonEndContext={state:S,year:S.year};
-    S.marketInjury=classifyMarketInjury({seasonFactor:S.seasonFactor,rehab:S.rehab,skipMid:S.skipMid,majorInjuryOccurred:S._majorInjuryThisSeason});if(S.stage==='PRO'){if(!S.ct)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');if(S.ct.schemaVersion!==3){S.ct=normalizeContract(S.ct,{currentYear:S.year,currentSalary:S.currentSalary,org:S.org,teamId:S.orgTeamId});S.currentSalary=S.ct.annualSalary;}const due=salaryDueForYear(S.ct,S.year);if(due.scheduleIndex<0)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');const payment=markSalaryPaid(S.ct,S.year),paid=payment.amount;S.ct=payment.contract;S.currentSalary=S.ct.annualSalary||paid;S.careerBaseSalary+=paid;S.careerEarnings+=paid;S.lastSalaryPaidYear=S.year;const incentivePayment=applyIncentivePayment(S,{contract:S.ct,evaluation:S.lastSalaryEvaluation,honors:S.honors,year:S.year}),incentive=incentivePayment.result;if(incentivePayment.paid){S.careerIncentive=incentivePayment.state.careerIncentive;S.careerEarnings=incentivePayment.state.careerEarnings;S.yearlyIncentivePaid=incentivePayment.state.yearlyIncentivePaid;}pendingOffseasonSalary=null;const continuation=contractContinuationForNextYear(S.ct,S.year),continuationText=continuation?`<br><b>現契約を継続</b><br>来季年俸：<b class="hl">${fmtMoney(continuation.nextSalary)}</b><br>契約残り：${continuation.remainingYears}年<br>年俸の再計算はありません<br>今季の実績は次回の契約評価へ反映されます。`:'';card('','シーズン終了',`今季支給年俸：<b class="hl">${fmtMoney(paid)}</b>｜出来高：<b class="hl">${fmtMoney(incentive.amount||0)}</b>（${incentive.level}）<br>スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}<br>今季受取総額：<b class="hl">${fmtMoney(paid+(incentive.amount||0)+(S.yearOutsideIncome||0))}</b>｜生涯収入：${fmtMoney(S.careerEarnings)}${continuationText}`);}else if(S.stage==='IND'){const candidate=salaryCandidate({sourceLevel:'IND',targetLevel:'IND',rating:currentMarketRating(),contractMult:1}),pay=candidate.annualSalary,previousSalary=S.currentSalary;S.currentSalary=pay;S.ct=null;if(S.lastSalaryPaidYear===S.year)throw new Error('SALARY_ALREADY_PAID_FOR_YEAR');S.careerBaseSalary+=pay;S.careerEarnings+=pay;S.lastSalaryPaidYear=S.year;saveSalaryDecision('RENEWAL',candidate,previousSalary,pay);card('','独立リーグ年間報酬',`今季年俸${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。生涯収入：${fmtMoney(S.careerEarnings)} ${salaryDecisionLink()}`);bindLatestSalaryDetailLink();}else if(S.stage==='CORP'){const pay=salaryFor('CORP',S.lastD||0);S.corpIncome+=pay;S.careerEarnings+=pay;card('','社会人給与',`企業給与${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。`);}const go=()=>movement();if(S.pool>0){const p=S.pool;S.pool=0;choose('',[{t:`能力点を分配（${p}点）`,main:true,f:()=>allocUI({pool:p},'シーズン成果の能力点',go)}]);}else go();};
+    S.marketInjury=classifyMarketInjury({seasonFactor:S.seasonFactor,rehab:S.rehab,skipMid:S.skipMid,majorInjuryOccurred:S._majorInjuryThisSeason});if(S.stage==='PRO'){if(!S.ct)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');if(S.ct.schemaVersion!==3){S.ct=normalizeContract(S.ct,{currentYear:S.year,currentSalary:S.currentSalary,org:S.org,teamId:S.orgTeamId});S.currentSalary=S.ct.annualSalary;}const due=salaryDueForYear(S.ct,S.year);if(due.scheduleIndex<0)throw new Error('PRO_PLAYER_WITHOUT_CONTRACT');const payment=markSalaryPaid(S.ct,S.year),paid=payment.amount;S.ct=payment.contract;S.currentSalary=S.ct.annualSalary||paid;S.careerBaseSalary+=paid;S.careerEarnings+=paid;S.lastSalaryPaidYear=S.year;const incentivePayment=applyIncentivePayment(S,{contract:S.ct,evaluation:S.lastSalaryEvaluation,honors:S.honors,year:S.year}),incentive=incentivePayment.result;if(incentivePayment.paid){S.careerIncentive=incentivePayment.state.careerIncentive;S.careerEarnings=incentivePayment.state.careerEarnings;S.yearlyIncentivePaid=incentivePayment.state.yearlyIncentivePaid;}pendingOffseasonSalary=null;const continuation=contractContinuationForNextYear(S.ct,S.year),continuationText=continuation?`<br><b>現契約を継続</b><br>来季年俸：<b class="hl">${fmtMoney(continuation.nextSalary)}</b><br>契約残り：${continuation.remainingYears}年<br>年俸の再計算はありません<br>今季の実績は次回の契約評価へ反映されます。`:'';card('','シーズン終了',`今季支給年俸：<b class="hl">${fmtMoney(paid)}</b>｜出来高：<b class="hl">${fmtMoney(incentive.amount||0)}</b>（${incentive.level}）<br>スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}<br>今季受取総額：<b class="hl">${fmtMoney(paid+(incentive.amount||0)+(S.yearOutsideIncome||0))}</b>｜生涯収入：${fmtMoney(S.careerEarnings)}${continuationText}`);}else if(S.stage==='IND'){const candidate=salaryCandidate({sourceLevel:'IND',targetLevel:'IND',rating:currentMarketRating(),contractMult:1}),pay=candidate.annualSalary,previousSalary=S.currentSalary;S.currentSalary=pay;S.ct=null;if(S.lastSalaryPaidYear===S.year)throw new Error('SALARY_ALREADY_PAID_FOR_YEAR');S.careerBaseSalary+=pay;S.careerEarnings+=pay;S.lastSalaryPaidYear=S.year;saveSalaryDecision('RENEWAL',candidate,previousSalary,pay);card('','独立リーグ年間報酬',`今季年俸${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。生涯収入：${fmtMoney(S.careerEarnings)} ${salaryDecisionLink()}`);bindLatestSalaryDetailLink();}else if(S.stage==='CORP'){const entry=corpSettlements.get(S),pay=entry.paid?entry.pay:salaryFor('CORP',S.lastD||0);if(!entry.paid){S.corpIncome+=pay;S.careerEarnings+=pay;entry.pay=pay;entry.paid=true;}card('','社会人給与',`企業給与${fmtMoney(pay)}を受領した。スポンサー収入：${fmtMoney(S.yearOutsideIncome||0)}。今季受取総額：${fmtMoney(pay+(S.yearOutsideIncome||0))}。`);}const go=()=>movement();if(S.pool>0){const p=S.pool;S.pool=0;choose('',[{t:`能力点を分配（${p}点）`,main:true,f:()=>allocUI({pool:p},'シーズン成果の能力点',go)}]);}else go();}
 
   movement = function(){migrateSalaryV130State();if(S.stage==='HS'){if(S.stageYr<3)advance();else pathChoiceHS();return;}if(S.stage==='U'){if(S.stageYr<4)advance();else pathChoiceU4();return;}if(S.stage==='CORP'){S.corpYears++;const eligible=(S.entryRoute==='HS'?S.corpYears>=3:S.corpYears>=2);const opts=[{t:'社会人野球を続ける',main:true,f:advance},{t:'独立リーグへ移籍',f:()=>{setAmateur('IND');advance();}},{t:'現役を退く',warn:true,f:()=>endGame('社会人野球で現役生活を終えた。')}];if(eligible)opts.unshift({t:'NPBドラフトへ再挑戦',main:true,f:()=>enterDraftPath('CORP')});choose('社会人シーズン終了',opts);return;}if(S.stage==='IND'){S.indYears++;choose('独立リーグシーズン終了',[{t:'NPBドラフトへ再挑戦',main:true,f:()=>enterDraftPath('IND')},{t:'独立リーグに残留',f:advance},{t:'社会人野球へ',f:()=>{setAmateur('CORP');advance();}},{t:'現役を退く',warn:true,f:()=>endGame('独立リーグで現役生活を終えた。')}]);return;}accrueForeignFirstTeamSeason(S);if(S.serviceTimeAccruedYear!==S.year){if(S.org==='NPB'&&S.lv==='NPB1'&&S.seasonFactor>0){S.npbRosterDays+=Math.round(145*S.seasonFactor);while(S.npbRosterDays>=145){S.npbRosterDays-=145;S.npbFaSeasons++;}S.serviceTime.NPB=Math.max(S.serviceTime.NPB,S.npbFaSeasons);}else if(S.org==='MLB'&&S.lv==='MLB'&&S.seasonFactor>=.5)S.serviceTime.MLB++;else if((S.org==='KBO'&&S.lv==='KBO1'||S.org==='CPBL'&&S.lv==='CPBL1')&&S.seasonFactor>0)S.serviceTime[S.org]++;S.serviceTimeAccruedYear=S.year;}const stage=contractStageFor(S.org);if(S.org==='NPB')S.faElig=S.serviceTime.NPB>=8;else if(S.org==='MLB')S.faElig=stage!=='CONTROL';LEGACY.movement();};
 
@@ -3088,7 +3142,7 @@ $('btn-start').onclick=()=>{
   const appVersion=$('app-version');if(appVersion)appVersion.textContent='v'+VERSION;
   createSeedShareController({trigger:$('board-share'),getSeed:()=>S?.seed||$('seed-show').value||SEED});
   const salaryDetailController=createSalaryDetailController({trigger:$('salary-detail-trigger'),panel:$('salary-detail-panel'),closeButton:$('salary-detail-close'),title:$('salary-detail-title'),body:$('salary-detail-body'),getDecision:()=>S?.lastSalaryDecision||null,getCurrentSalary:()=>S?.currentSalary||0,getContract:()=>S?.ct||null,getIncome:()=>({signing:S?.careerSigningBonus||0,stipend:S?.careerDevelopmentStipend||0,base:S?.careerBaseSalary||0,incentive:S?.careerIncentive||0,buyout:S?.careerBuyout||0,outside:S?.careerOutsideIncome||0,yearOutside:S?.yearOutsideIncome||0,total:S?.careerEarnings||0,corp:S?.corpIncome||0}),isProfessional:()=>S?.stage==='PRO'||S?.stage==='IND',fmtMoney});
-  const navigation=initNavigation({onOpenPlayer:buildPlayerViewModel,onOpenCareer:buildCareerViewModel});
+  const navigation=initNavigation({onNavigate:archiveTraitResults,onOpenPlayer:buildPlayerViewModel,onOpenCareer:buildCareerViewModel});
   $('btn-start').onclick=startJapanese;
   $('seed-re').onclick=e=>{e.preventDefault();const s=generateSeed();$('seed-show').value=s;SEED=s;};
   $('seed-show').value=normalizeSeed(new URLSearchParams(location.search).get('seed'))||generateSeed();
